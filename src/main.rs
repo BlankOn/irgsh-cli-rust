@@ -1,19 +1,49 @@
 extern crate clap;
 extern crate dirs;
 extern crate reqwest;
-#[macro_use] extern crate serde_json;
+#[macro_use]
+extern crate serde_json;
 
 use clap::{App, Arg, SubCommand};
+use serde::{Deserialize, Serialize};
+use serde_yaml::{self};
 use std::fs;
-use std::fs::File;
-use std::io::Write;
 use std::num::ParseIntError;
+use std::path::Path;
 use std::process;
-use url::{Url, ParseError};
+
+extern crate question;
+use question::{Answer, Question};
+
+
+const CONFIG_FILE_PATH: &str = ".irgsh/irgsh.yaml";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Config {
+    chief_url: String,
+    maintainer_key: String,
+    config_file_path: String,
+}
+
+impl Config {
+    fn set(&self) {
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&self.config_file_path)
+            .expect("Couldn't write file");
+        serde_yaml::to_writer(f, &self).unwrap();
+    }
+    fn load(&self) -> Config {
+        let f = std::fs::File::open(&self.config_file_path).expect("Could not open file.");
+        let loaded: Config = serde_yaml::from_reader(f).expect("Could not read values.");
+        return loaded;
+    }
+}
 
 fn graceful_exit<E, T>(message: String, exit_code: i32) -> Result<T, E> {
-       println!("{}", message);
-       process::exit(exit_code);
+    println!("{}", message);
+    process::exit(exit_code);
 }
 
 fn main() -> Result<(), ParseIntError> {
@@ -80,65 +110,87 @@ fn main() -> Result<(), ParseIntError> {
                         .index(1)))
     								.get_matches();
 
+    // Prepare path
     let home_dir_path = dirs::home_dir().unwrap();
-    let mut config_file = home_dir_path.into_os_string().into_string().unwrap();
+    let home_dir_path = home_dir_path.into_os_string().into_string().unwrap();
+    let mut config_file_path = home_dir_path.clone();
+    config_file_path.push_str("/");
+    config_file_path.push_str(&CONFIG_FILE_PATH);
 
+    // Global config, could be reused anywhere under subcommand scopes bellow
+    let mut config = Config {
+        config_file_path: config_file_path.to_string(),
+        chief_url: "".to_string(),
+        maintainer_key: "".to_string(),
+    };
 
     if let Some(matches) = matches.subcommand_matches("init") {
-        let mut path_str = "/.irgsh";
-        config_file.push_str(&path_str);
-        fs::create_dir(&config_file).ok();
-        path_str = "/IRGSH_CHIEF_ADDRESS";
-        config_file.push_str(&path_str);
-        // TOOD validate URL
+        // Retrieve the arguments/params
         let url = matches.value_of("chief").unwrap();
         let key = matches.value_of("key").unwrap();
-        println!("{url}");
-        println!("{key}");
-        let mut f = File::create(&config_file).expect("Unable to create file");
-        f.write_all(url.as_bytes()).expect("Unable to write data");
+        config.chief_url = url.to_string();
+        config.maintainer_key = key.to_string();
+
+        if Path::new(&config.config_file_path).exists() {
+            let loaded = config.load();
+            println!("Current config file is already exist with this content:");
+            println!("{:?}", loaded);
+            let answer = Question::new("Do you want to continue to override this with your new config?")
+                .default(Answer::YES)
+                .show_defaults()
+                .confirm();
+            if answer != Answer::YES {
+                return graceful_exit("".to_string(), 0);
+            }
+        }
+
+        let mut config_dir = home_dir_path.clone();
+        config_dir.push_str("/.irgsh");
+        fs::create_dir(&config_dir).ok();
+
+        // Write the config to file
+        config.set();
         println!(
-            "Successfully sets the chief address to {}. Now you can use irgsh-cli.",
-            matches.value_of("chief").unwrap()
+            "Successfully sets the chief address to {}. Now you can use irgsh-cli. Happy Hacking",
+            url.to_string()
         );
         return Ok(());
     }
 
-    config_file.push_str("/.irgsh/IRGSH_CHIEF_ADDRESS");
-    let chief_url_result = fs::read_to_string(&config_file);
-    let chief_url = match chief_url_result {
-        Ok(url) => url,
-        Err(error) => "Error: unable to read config file. Please initialize the irgsh-cli first. See --help for further information.".to_string(),
-    };
-
-    if chief_url.contains("Error") {
-       return graceful_exit(chief_url, 1);
+    if !Path::new(&config.config_file_path).exists() {
+        let err_message: &str = "Error: unable to read config file. Please initialize the irgsh-cli first. See --help for further information.";
+        return graceful_exit(err_message.to_string(), 1);
     }
 
     if let Some(matches) = matches.subcommand_matches("submit") {
-        println!("Chief       : {}", chief_url);
-				if matches.value_of("source").unwrap().chars().count() > 0 {
-        	println!("Source URL  : {}", matches.value_of("source").unwrap());
-				}
-				if matches.value_of("package").unwrap().chars().count() > 0 {
-        	println!("Package URL : {}", matches.value_of("package").unwrap());
-				}
-    		let mut chief_url = fs::read_to_string(&config_file).expect("Unable to read config file. Please initialize the irgsh-cli first. See --help for further information.");
+        // Retrieve the arguments/params
+        let source = matches.value_of("source").unwrap();
+        let package = matches.value_of("package").unwrap();
+
+        config.load();
+
+        println!("Chief       : {}", &config.chief_url);
+        if matches.value_of("source").unwrap().chars().count() > 0 {
+            println!("Source URL  : {}", source);
+        }
+        if matches.value_of("package").unwrap().chars().count() > 0 {
+            println!("Package URL : {}", package);
+        }
+        let mut chief_url = config.chief_url.clone();
         chief_url.push_str("/api/v1/submit");
         println!("Submit URL  : {}", chief_url);
 
-    		let payload: serde_json::Value = json!({
-            "sourceUrl": matches.value_of("source").unwrap(),
-            "packageUrl": matches.value_of("package").unwrap()
-    		});
+        let payload: serde_json::Value = json!({
+        "sourceUrl": source,
+        "packageUrl": package
+        });
 
-				let _result: serde_json::Value = match post(chief_url, payload) {
-					Ok(result) => result,
-					Err(_e) => return Ok(())
-				};
+        let _result: serde_json::Value = match post(chief_url, payload) {
+            Ok(result) => result,
+            Err(_e) => return Ok(()),
+        };
 
         return Ok(());
-
     } else if let Some(matches) = matches.subcommand_matches("status") {
         println!(
             "Status of PipelineID: {}",
@@ -158,35 +210,13 @@ fn main() -> Result<(), ParseIntError> {
     }
 }
 
-
 fn post(url: String, json_payload: serde_json::Value) -> Result<serde_json::Value, reqwest::Error> {
-    		let echo_json: serde_json::Value = reqwest::Client::new()
-    		    .post(&url)
-    		    .json(&json_payload
-    		    )
-    		    .send()?
-            .json()?;
+    let echo_json: serde_json::Value = reqwest::Client::new()
+        .post(&url)
+        .json(&json_payload)
+        .send()?
+        .json()?;
 
-          println!("{:#?}", echo_json);
-          return Ok(echo_json)
-}
-
-fn handler(e: reqwest::Error) {
-   if e.is_http() {
-       match e.url() {
-           None => println!("No Url given"),
-           Some(url) => println!("Problem making request to: {}", url),
-       }
-   }
-   // Inspect the internal error and output it
-   if e.is_serialization() {
-      let serde_error = match e.get_ref() {
-           None => return,
-           Some(err) => err,
-       };
-       println!("problem parsing information {}", serde_error);
-   }
-   if e.is_redirect() {
-       println!("server redirecting too many times or making loop");
-   }
+    println!("{:#?}", echo_json);
+    return Ok(echo_json);
 }
